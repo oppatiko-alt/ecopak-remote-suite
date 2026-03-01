@@ -665,20 +665,17 @@ class MainActivity : AppCompatActivity() {
 
             val display = candidate.device.name ?: candidate.device.address
             statusCallback("Connecting $display (${candidate.source})")
-            val order = connectionOrder(candidate.device)
-            for (transport in order) {
-                val ok = when (transport) {
-                    ConnectionMode.CLASSIC -> connectClassic(candidate.device)
-                    ConnectionMode.BLE -> connectBle(candidate.device)
-                    ConnectionMode.NONE -> false
-                }
-                if (ok) {
-                    statusCallback("Bluetooth connected (${transport.name.lowercase()}): $display")
-                    return
-                }
+            val ok = connectClassic(candidate.device)
+            if (ok) {
+                statusCallback("Bluetooth connected (classic): $display")
+                return
             }
 
-            statusCallback("Bluetooth connect failed, retrying...")
+            if (candidate.device.bondState != BluetoothDevice.BOND_BONDED) {
+                statusCallback("Bluetooth connect failed: pair robot in Android Bluetooth settings")
+            } else {
+                statusCallback("Bluetooth connect failed, retrying...")
+            }
             closeTransports(true)
             sleepQuiet(1400)
         }
@@ -693,19 +690,11 @@ class MainActivity : AppCompatActivity() {
 
             val bonded = runCatching { adapter.bondedDevices }.getOrNull().orEmpty()
                 .sortedBy { it.name ?: it.address }
-            bonded.firstOrNull { isEcopakName(it.name) }?.let { return CandidateDevice(it, "bonded") }
+            bonded.firstOrNull { isEcopakName(it.name) }?.let { return CandidateDevice(it, "bonded_ecopak") }
 
-            val scanned = scanBleForEcopak(adapter, 6000)
-            if (scanned != null) return CandidateDevice(scanned, "ble_scan")
+            // If name is not exposed but only one bonded robot-like module exists, try it.
+            bonded.firstOrNull()?.let { return CandidateDevice(it, "bonded_any") }
             return null
-        }
-
-        private fun connectionOrder(device: BluetoothDevice): List<ConnectionMode> {
-            return when {
-                device.bondState == BluetoothDevice.BOND_BONDED -> listOf(ConnectionMode.CLASSIC, ConnectionMode.BLE)
-                device.type == BluetoothDevice.DEVICE_TYPE_LE -> listOf(ConnectionMode.BLE, ConnectionMode.CLASSIC)
-                else -> listOf(ConnectionMode.CLASSIC, ConnectionMode.BLE)
-            }
         }
 
         @SuppressLint("MissingPermission")
@@ -716,8 +705,14 @@ class MainActivity : AppCompatActivity() {
             closeClassicSocket()
 
             val sockets = listOfNotNull(
+                runCatching {
+                    val method = device.javaClass.getMethod(
+                        "createInsecureRfcommSocketToServiceRecord",
+                        UUID::class.java
+                    )
+                    method.invoke(device, classicUuid) as? BluetoothSocket
+                }.getOrNull(),
                 runCatching { device.createInsecureRfcommSocketToServiceRecord(classicUuid) }.getOrNull(),
-                runCatching { device.createRfcommSocketToServiceRecord(classicUuid) }.getOrNull()
             )
             for (socket in sockets) {
                 try {
