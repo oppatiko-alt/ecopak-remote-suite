@@ -1,127 +1,264 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/remote_bg"
-    android:padding="12dp">
+    android:background="@color/remote_bg">
 
     <LinearLayout
-        android:id="@+id/topCard"
-        android:layout_width="0dp"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="@color/remote_card"
         android:orientation="vertical"
-        android:padding="10dp"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent">
+        android:padding="12dp">
 
-        <EditText
-            android:id="@+id/editServer"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Server URL (ws://IP:8080)"
-            android:inputType="textUri"
-            android:text="ws://192.168.1.10:8080"
-            android:textColor="@color/remote_text"
-            android:textColorHint="#99FFFFFF" />
+            android:background="@color/remote_card"
+            android:orientation="vertical"
+            android:padding="10dp">
 
-        <EditText
-            android:id="@+id/editSession"
+            <EditText
+                android:id="@+id/editServer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Server URL"
+                android:inputType="textUri"
+                android:text="wss://ecopakremote.onrender.com"
+                android:textColor="@color/remote_text"
+                android:textColorHint="#99FFFFFF" />
+
+            <EditText
+                android:id="@+id/editSession"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Session ID"
+                android:text="ecopak-demo"
+                android:textColor="@color/remote_text"
+                android:textColorHint="#99FFFFFF" />
+
+            <EditText
+                android:id="@+id/editToken"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Token"
+                android:text="6em44j45"
+                android:textColor="@color/remote_text"
+                android:textColorHint="#99FFFFFF" />
+
+            <Button
+                android:id="@+id/btnConnect"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Connect" />
+
+            <TextView
+                android:id="@+id/txtStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Idle"
+                android:textColor="@color/remote_text" />
+
+            <TextView
+                android:id="@+id/txtSpeed"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Speed: 3"
+                android:textColor="@color/remote_text" />
+        </LinearLayout>
+
+        <ImageView
+            android:id="@+id/imgStream"
+            android:layout_width="match_parent"
+            android:layout_height="260dp"
+            android:layout_marginTop="10dp"
+            android:background="#11253A"
+            android:contentDescription="Stream"
+            android:scaleType="fitCenter" />
+
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Session ID"
-            android:text="ecopak-demo"
-            android:textColor="@color/remote_text"
-            android:textColorHint="#99FFFFFF" />
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal">
 
-        <EditText
-            android:id="@+id/editToken"
+            <Button
+                android:id="@+id/btnSpeedDown"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Speed -" />
+
+            <Button
+                android:id="@+id/btnSpeedUp"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="Speed +" />
+        </LinearLayout>
+
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Token (optional)"
-            android:textColor="@color/remote_text"
-            android:textColorHint="#99FFFFFF" />
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/btnConnect"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Connect" />
+            <Button
+                android:id="@+id/btnSpeedSlow"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Slow" />
 
-        <TextView
-            android:id="@+id/txtStatus"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="Idle"
-            android:textColor="@color/remote_text" />
-    </LinearLayout>
-
-    <ImageView
-        android:id="@+id/imgStream"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:layout_marginTop="10dp"
-        android:background="#11253A"
-        android:contentDescription="Stream"
-        android:scaleType="fitCenter"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/topCard"
-        app:layout_constraintBottom_toTopOf="@id/controlPad" />
-
-    <LinearLayout
-        android:id="@+id/controlPad"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:orientation="vertical"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent">
+            <Button
+                android:id="@+id/btnSpeedNormal"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="Normal" />
+        </LinearLayout>
 
         <Button
             android:id="@+id/btnForward"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
             android:text="Forward" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             android:orientation="horizontal">
 
             <Button
-                android:id="@+id/btnLeft"
+                android:id="@+id/btnTurnLeft"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Left" />
+                android:text="Left Turn" />
 
             <Button
-                android:id="@+id/btnStop"
+                android:id="@+id/btnRobotStop"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:layout_marginEnd="8dp"
                 android:layout_weight="1"
-                android:text="Stop" />
+                android:text="Robot Stop" />
 
             <Button
-                android:id="@+id/btnRight"
+                android:id="@+id/btnTurnRight"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Right" />
+                android:text="Right Turn" />
         </LinearLayout>
 
         <Button
-            android:id="@+id/btnBack"
+            android:id="@+id/btnBackward"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             android:text="Backward" />
-    </LinearLayout>
 
-</androidx.constraintlayout.widget.ConstraintLayout>
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnTankLeft"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Tank Left" />
+
+            <Button
+                android:id="@+id/btnTankRight"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="Tank Right" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnBrushLeft"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Brush Left" />
+
+            <Button
+                android:id="@+id/btnBrushStop"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:text="Brush Stop" />
+
+            <Button
+                android:id="@+id/btnBrushRight"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Brush Right" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnLight"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Light" />
+
+            <Button
+                android:id="@+id/btnValve"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:text="Valve" />
+
+            <Button
+                android:id="@+id/btnSensors"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Sensors" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnAngleSensor"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Angle Sensor Enable" />
+
+        <Button
+            android:id="@+id/btnEmergencyStop"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="EMERGENCY STOP" />
+    </LinearLayout>
+</ScrollView>

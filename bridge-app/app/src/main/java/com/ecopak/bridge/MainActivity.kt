@@ -1,6 +1,7 @@
-﻿package com.ecopak.bridge
+package com.ecopak.bridge
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothSocket
 import android.content.pm.PackageManager
@@ -9,6 +10,8 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Base64
 import android.widget.Button
@@ -34,6 +37,7 @@ import java.nio.ByteBuffer
 import java.util.UUID
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
@@ -46,9 +50,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editBtMac: EditText
 
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val ioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-
     private var ws: WebSocket? = null
+    private var keepWsConnected = false
+    private val reconnectHandler = Handler(Looper.getMainLooper())
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     private val wsClient = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
@@ -56,13 +62,31 @@ class MainActivity : AppCompatActivity() {
     private var lastFrameSentAt = 0L
     private val frameIntervalMs = 160L
 
-    private val btBridge = BluetoothBridge()
+    private val prefs by lazy { getSharedPreferences("bridge_prefs", MODE_PRIVATE) }
+
+    private val btBridge = PersistentBluetoothBridge { message ->
+        runOnUiThread { setStatus(message) }
+    }
+
+    private val reconnectRunnable = Runnable {
+        if (keepWsConnected) {
+            openWebSocket()
+        }
+    }
+
+    private val telemetryRunnable = object : Runnable {
+        override fun run() {
+            sendTelemetry()
+            mainHandler.postDelayed(this, 2000)
+        }
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
         if (hasAllPermissions()) {
             startCamera()
+            startAutoConnections()
         } else {
             setStatus("Permissions missing")
         }
@@ -79,25 +103,39 @@ class MainActivity : AppCompatActivity() {
         editToken = findViewById(R.id.editToken)
         editBtMac = findViewById(R.id.editBtMac)
 
-        findViewById<Button>(R.id.btnConnectServer).setOnClickListener {
-            connectServer()
-        }
-
-        findViewById<Button>(R.id.btnConnectBt).setOnClickListener {
-            connectBluetooth()
-        }
+        loadDefaults()
+        bindUi()
 
         if (hasAllPermissions()) {
             startCamera()
+            startAutoConnections()
         } else {
             permissionLauncher.launch(requiredPermissions())
         }
     }
 
+    private fun bindUi() {
+        findViewById<Button>(R.id.btnConnectServer).setOnClickListener {
+            connectServer()
+        }
+
+        findViewById<Button>(R.id.btnConnectBt).setOnClickListener {
+            startBluetoothPersistent()
+        }
+    }
+
+    private fun startAutoConnections() {
+        connectServer()
+        val mac = editBtMac.text.toString().trim()
+        if (mac.isNotEmpty()) {
+            btBridge.startPersistent(mac)
+            setStatus("BT auto-connect started")
+        }
+        mainHandler.postDelayed(telemetryRunnable, 1500)
+    }
+
     private fun requiredPermissions(): Array<String> {
-        val p = mutableListOf(
-            Manifest.permission.CAMERA
-        )
+        val p = mutableListOf(Manifest.permission.CAMERA)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             p.add(Manifest.permission.BLUETOOTH_CONNECT)
             p.add(Manifest.permission.BLUETOOTH_SCAN)
@@ -114,6 +152,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectServer() {
+        keepWsConnected = true
+        saveDefaults()
+        openWebSocket()
+    }
+
+    private fun openWebSocket() {
         val raw = editServer.text.toString().trim()
         val session = editSession.text.toString().trim()
         val token = editToken.text.toString().trim()
@@ -128,10 +172,10 @@ class MainActivity : AppCompatActivity() {
             .replace("https://", "wss://")
 
         ws?.close(1000, "reconnect")
-
-        val request = Request.Builder().url(wsUrl).build()
+        reconnectHandler.removeCallbacks(reconnectRunnable)
         setStatus("Connecting relay...")
 
+        val request = Request.Builder().url(wsUrl).build()
         ws = wsClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 val reg = JSONObject()
@@ -148,27 +192,31 @@ class MainActivity : AppCompatActivity() {
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 runOnUiThread { setStatus("Relay closed: $code") }
+                scheduleWsReconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 runOnUiThread { setStatus("Relay error: ${t.message}") }
+                scheduleWsReconnect()
             }
         })
     }
 
-    private fun connectBluetooth() {
+    private fun scheduleWsReconnect() {
+        if (!keepWsConnected) return
+        reconnectHandler.removeCallbacks(reconnectRunnable)
+        reconnectHandler.postDelayed(reconnectRunnable, 2500)
+    }
+
+    private fun startBluetoothPersistent() {
         val mac = editBtMac.text.toString().trim()
         if (mac.isEmpty()) {
             setStatus("Bluetooth MAC required")
             return
         }
-
-        ioExecutor.execute {
-            val ok = btBridge.connect(mac)
-            runOnUiThread {
-                setStatus(if (ok) "Bluetooth connected" else "Bluetooth failed")
-            }
-        }
+        saveDefaults()
+        btBridge.startPersistent(mac)
+        setStatus("BT persistent connect started")
     }
 
     private fun handleRelayMessage(text: String) {
@@ -184,12 +232,22 @@ class MainActivity : AppCompatActivity() {
                 val command = obj.optString("command")
                 if (command.isNotEmpty()) {
                     btBridge.send(command)
-                    runOnUiThread { setStatus("CMD -> BT: $command") }
+                    runOnUiThread { setStatus("CMD queued to BT: $command") }
                 }
             }
+
             "error" -> runOnUiThread { setStatus("Relay error: ${obj.optString("message")}") }
             else -> Unit
         }
+    }
+
+    private fun sendTelemetry() {
+        val payload = JSONObject()
+            .put("type", "telemetry")
+            .put("ts", System.currentTimeMillis())
+            .put("status", if (btBridge.isConnected()) "bt_connected" else "bt_disconnected")
+            .put("battery", 0)
+        ws?.send(payload.toString())
     }
 
     private fun startCamera() {
@@ -222,9 +280,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleFrame(image: ImageProxy) {
         try {
             val now = SystemClock.elapsedRealtime()
-            if (now - lastFrameSentAt < frameIntervalMs) {
-                return
-            }
+            if (now - lastFrameSentAt < frameIntervalMs) return
             val base64 = imageToJpegBase64(image, 45) ?: return
             lastFrameSentAt = now
 
@@ -262,7 +318,6 @@ class MainActivity : AppCompatActivity() {
         val vPlane = image.planes[2]
 
         val nv21 = ByteArray(width * height + (width * height / 2))
-
         copyLuma(yPlane.buffer, yPlane.rowStride, width, height, nv21)
 
         val chromaHeight = height / 2
@@ -276,7 +331,6 @@ class MainActivity : AppCompatActivity() {
         val uPixelStride = uPlane.pixelStride
 
         var outputOffset = width * height
-
         for (row in 0 until chromaHeight) {
             for (col in 0 until chromaWidth) {
                 val vIndex = row * vRowStride + col * vPixelStride
@@ -314,53 +368,182 @@ class MainActivity : AppCompatActivity() {
         txtStatus.text = text
     }
 
+    private fun loadDefaults() {
+        editServer.setText(prefs.getString("server", "wss://ecopakremote.onrender.com"))
+        editSession.setText(prefs.getString("session", "ecopak-demo"))
+        editToken.setText(prefs.getString("token", "6em44j45"))
+        editBtMac.setText(prefs.getString("btMac", ""))
+    }
+
+    private fun saveDefaults() {
+        prefs.edit()
+            .putString("server", editServer.text.toString().trim())
+            .putString("session", editSession.text.toString().trim())
+            .putString("token", editToken.text.toString().trim())
+            .putString("btMac", editBtMac.text.toString().trim())
+            .apply()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        keepWsConnected = false
+        reconnectHandler.removeCallbacks(reconnectRunnable)
+        mainHandler.removeCallbacks(telemetryRunnable)
         ws?.close(1000, "destroy")
         wsClient.dispatcher.executorService.shutdown()
         cameraExecutor.shutdown()
-        ioExecutor.shutdown()
-        btBridge.close()
+        btBridge.shutdown()
+        saveDefaults()
     }
 
-    private class BluetoothBridge {
+    private class PersistentBluetoothBridge(
+        private val statusCallback: (String) -> Unit
+    ) {
         private val uuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+        private val commandQueue = LinkedBlockingQueue<String>(500)
+
+        @Volatile
+        private var running = true
+
+        @Volatile
+        private var keepConnected = false
+
+        @Volatile
+        private var targetMac: String? = null
+
+        @Volatile
         private var socket: BluetoothSocket? = null
 
-        fun connect(mac: String): Boolean {
-            return try {
-                val adapter = BluetoothAdapter.getDefaultAdapter() ?: return false
-                val device = adapter.getRemoteDevice(mac)
-                adapter.cancelDiscovery()
+        private val worker = Thread {
+            while (running) {
+                if (!keepConnected) {
+                    sleepQuiet(250)
+                    continue
+                }
 
-                close()
-                val s = device.createRfcommSocketToServiceRecord(uuid)
-                s.connect()
-                socket = s
-                true
-            } catch (_: Exception) {
-                close()
-                false
+                val currentSocket = socket
+                if (currentSocket == null || !currentSocket.isConnected) {
+                    connectLoop()
+                    continue
+                }
+
+                try {
+                    val next = commandQueue.poll(500, TimeUnit.MILLISECONDS)
+                    if (next != null) {
+                        val payload = (next + "\n").toByteArray(Charsets.UTF_8)
+                        currentSocket.outputStream.write(payload)
+                        currentSocket.outputStream.flush()
+                    } else {
+                        currentSocket.inputStream.available()
+                    }
+                } catch (_: Exception) {
+                    statusCallback("Bluetooth disconnected, reconnecting...")
+                    closeSocket()
+                    sleepQuiet(500)
+                }
+            }
+            closeSocket()
+        }.apply {
+            name = "BT-Persistent-Worker"
+            isDaemon = true
+            start()
+        }
+
+        fun startPersistent(mac: String) {
+            targetMac = mac.trim().uppercase()
+            keepConnected = targetMac!!.isNotBlank()
+            if (keepConnected) {
+                statusCallback("Bluetooth target: ${targetMac}")
             }
         }
 
         fun send(command: String) {
+            if (!keepConnected || command.isBlank()) return
+            commandQueue.offer(command)
+        }
+
+        fun isConnected(): Boolean {
+            val s = socket
+            return s != null && s.isConnected
+        }
+
+        fun shutdown() {
+            running = false
+            keepConnected = false
+            commandQueue.clear()
+            closeSocket()
+            worker.interrupt()
+        }
+
+        private fun connectLoop() {
+            val mac = targetMac
+            if (mac.isNullOrBlank()) {
+                sleepQuiet(500)
+                return
+            }
+
             try {
-                val payload = (command + "\n").toByteArray(Charsets.UTF_8)
-                socket?.outputStream?.write(payload)
-                socket?.outputStream?.flush()
+                val adapter = BluetoothAdapter.getDefaultAdapter()
+                if (adapter == null) {
+                    statusCallback("Bluetooth adapter missing")
+                    sleepQuiet(1500)
+                    return
+                }
+                if (!adapter.isEnabled) {
+                    statusCallback("Bluetooth is off")
+                    sleepQuiet(1500)
+                    return
+                }
+
+                val device = adapter.getRemoteDevice(mac)
+                adapter.cancelDiscovery()
+
+                closeSocket()
+
+                val trySockets = listOf(
+                    runCatching { device.createInsecureRfcommSocketToServiceRecord(uuid) }.getOrNull(),
+                    runCatching { device.createRfcommSocketToServiceRecord(uuid) }.getOrNull()
+                ).filterNotNull()
+
+                var connected: BluetoothSocket? = null
+                for (s in trySockets) {
+                    try {
+                        s.connect()
+                        connected = s
+                        break
+                    } catch (_: Exception) {
+                        runCatching { s.close() }
+                    }
+                }
+
+                if (connected != null) {
+                    socket = connected
+                    statusCallback("Bluetooth connected: $mac")
+                } else {
+                    statusCallback("Bluetooth connect failed, retrying...")
+                    sleepQuiet(1500)
+                }
             } catch (_: Exception) {
-                close()
+                statusCallback("Bluetooth connect error, retrying...")
+                sleepQuiet(1500)
             }
         }
 
-        fun close() {
+        private fun closeSocket() {
             try {
                 socket?.close()
             } catch (_: Exception) {
                 // ignore
             } finally {
                 socket = null
+            }
+        }
+
+        private fun sleepQuiet(ms: Long) {
+            try {
+                Thread.sleep(ms)
+            } catch (_: InterruptedException) {
+                // ignore
             }
         }
     }

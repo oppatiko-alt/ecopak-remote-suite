@@ -15,9 +15,9 @@ Sağlık kontrolü:
 ## 2) Bridge App (Robot Üstündeki Telefon)
 
 - APK: `bridge-app-debug.apk`
-- Server URL: `ws://SUNUCU_IP:8080`
+- Server URL: `wss://ecopakremote.onrender.com` (varsayılan)
 - Session ID: örn `ecopak-demo`
-- Token: `toprak-123`
+- Token: `6em44j45` (varsayılan)
 - BT MAC: ECOPAK Bluetooth MAC adresi
 
 Sonra:

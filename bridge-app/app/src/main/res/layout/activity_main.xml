@@ -21,9 +21,9 @@
             android:id="@+id/editServer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Server URL (ws://IP:8080)"
+            android:hint="Server URL"
             android:inputType="textUri"
-            android:text="ws://192.168.1.10:8080"
+            android:text="wss://ecopakremote.onrender.com"
             android:textColor="@color/bridge_text"
             android:textColorHint="#99FFFFFF" />
 
@@ -40,7 +40,8 @@
             android:id="@+id/editToken"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Token (optional)"
+            android:hint="Token"
+            android:text="6em44j45"
             android:textColor="@color/bridge_text"
             android:textColorHint="#99FFFFFF" />
 
