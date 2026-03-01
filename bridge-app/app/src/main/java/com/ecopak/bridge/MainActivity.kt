@@ -456,6 +456,9 @@ class MainActivity : AppCompatActivity() {
         @Volatile
         private var bleWriteInProgress = false
 
+        @Volatile
+        private var bleLastWriteSuccess = true
+
         private val bleWriteLock = Object()
 
         @Volatile
@@ -597,6 +600,7 @@ class MainActivity : AppCompatActivity() {
                     BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 }
                 rx.value = command.toByteArray(Charsets.UTF_8)
+                bleLastWriteSuccess = true
                 bleWriteInProgress = true
                 val queued = runCatching { gatt.writeCharacteristic(rx) }.getOrDefault(false)
                 if (!queued) {
@@ -614,7 +618,7 @@ class MainActivity : AppCompatActivity() {
                     return@synchronized false
                 }
                 bleWriteInProgress = false
-                true
+                bleLastWriteSuccess
             }
         }
 
@@ -774,6 +778,7 @@ class MainActivity : AppCompatActivity() {
                     status: Int
                 ) {
                     synchronized(bleWriteLock) {
+                        bleLastWriteSuccess = status == BluetoothGatt.GATT_SUCCESS
                         bleWriteInProgress = false
                         bleWriteLock.notifyAll()
                     }
