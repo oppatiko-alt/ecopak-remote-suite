@@ -1,0 +1,13 @@
+﻿{
+  "name": "ecopak-relay-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Relay server for ECOPAK bridge and remote apps",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

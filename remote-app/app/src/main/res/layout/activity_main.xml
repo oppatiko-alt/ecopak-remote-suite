@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/remote_bg"
+    android:padding="12dp">
+
+    <LinearLayout
+        android:id="@+id/topCard"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="@color/remote_card"
+        android:orientation="vertical"
+        android:padding="10dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <EditText
+            android:id="@+id/editServer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Server URL (ws://IP:8080)"
+            android:inputType="textUri"
+            android:text="ws://192.168.1.10:8080"
+            android:textColor="@color/remote_text"
+            android:textColorHint="#99FFFFFF" />
+
+        <EditText
+            android:id="@+id/editSession"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Session ID"
+            android:text="ecopak-demo"
+            android:textColor="@color/remote_text"
+            android:textColorHint="#99FFFFFF" />
+
+        <EditText
+            android:id="@+id/editToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Token (optional)"
+            android:textColor="@color/remote_text"
+            android:textColorHint="#99FFFFFF" />
+
+        <Button
+            android:id="@+id/btnConnect"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Connect" />
+
+        <TextView
+            android:id="@+id/txtStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="Idle"
+            android:textColor="@color/remote_text" />
+    </LinearLayout>
+
+    <ImageView
+        android:id="@+id/imgStream"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="10dp"
+        android:background="#11253A"
+        android:contentDescription="Stream"
+        android:scaleType="fitCenter"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/topCard"
+        app:layout_constraintBottom_toTopOf="@id/controlPad" />
+
+    <LinearLayout
+        android:id="@+id/controlPad"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:orientation="vertical"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <Button
+            android:id="@+id/btnForward"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Forward" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnLeft"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Left" />
+
+            <Button
+                android:id="@+id/btnStop"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:text="Stop" />
+
+            <Button
+                android:id="@+id/btnRight"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Right" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Backward" />
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bridge_bg"
+    android:padding="12dp">
+
+    <LinearLayout
+        android:id="@+id/topCard"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="@color/bridge_card"
+        android:orientation="vertical"
+        android:padding="10dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <EditText
+            android:id="@+id/editServer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Server URL (ws://IP:8080)"
+            android:inputType="textUri"
+            android:text="ws://192.168.1.10:8080"
+            android:textColor="@color/bridge_text"
+            android:textColorHint="#99FFFFFF" />
+
+        <EditText
+            android:id="@+id/editSession"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Session ID"
+            android:text="ecopak-demo"
+            android:textColor="@color/bridge_text"
+            android:textColorHint="#99FFFFFF" />
+
+        <EditText
+            android:id="@+id/editToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Token (optional)"
+            android:textColor="@color/bridge_text"
+            android:textColorHint="#99FFFFFF" />
+
+        <EditText
+            android:id="@+id/editBtMac"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Robot BT MAC (AA:BB:CC:DD:EE:FF)"
+            android:inputType="text"
+            android:textColor="@color/bridge_text"
+            android:textColorHint="#99FFFFFF" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnConnectServer"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Server Connect" />
+
+            <Button
+                android:id="@+id/btnConnectBt"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="BT Connect" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/txtStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Idle"
+            android:textColor="@color/bridge_text"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="12dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/topCard" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

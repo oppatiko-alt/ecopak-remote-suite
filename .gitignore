@@ -1,0 +1,21 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# Node
+relay-server/node_modules/
+relay-server/relay-server.pid
+relay-server/relay-server.log
+
+# Android / Gradle
+**/.gradle/
+**/build/
+**/local.properties
+*.iml
+
+# Artifacts
+*.apk
+*.aab
+*.keystore

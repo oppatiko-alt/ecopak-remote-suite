@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="remote_bg">#071222</color>
+    <color name="remote_card">#0E2A45</color>
+    <color name="remote_accent">#27d2ff</color>
+    <color name="remote_text">#eef5ff</color>
+</resources>
