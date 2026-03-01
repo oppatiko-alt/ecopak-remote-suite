@@ -49,7 +49,7 @@
             android:id="@+id/editBtMac"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Robot BT MAC (AA:BB:CC:DD:EE:FF)"
+            android:hint="Robot BT MAC (optional)"
             android:inputType="text"
             android:textColor="@color/bridge_text"
             android:textColorHint="#99FFFFFF" />

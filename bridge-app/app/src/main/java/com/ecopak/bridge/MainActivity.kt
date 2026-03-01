@@ -3,7 +3,16 @@ package com.ecopak.bridge
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothSocket
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.graphics.Rect
@@ -35,10 +44,12 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : AppCompatActivity() {
 
@@ -64,7 +75,7 @@ class MainActivity : AppCompatActivity() {
 
     private val prefs by lazy { getSharedPreferences("bridge_prefs", MODE_PRIVATE) }
 
-    private val btBridge = PersistentBluetoothBridge { message ->
+    private val btBridge = PersistentBluetoothBridge(this) { message ->
         runOnUiThread { setStatus(message) }
     }
 
@@ -127,9 +138,11 @@ class MainActivity : AppCompatActivity() {
     private fun startAutoConnections() {
         connectServer()
         val mac = editBtMac.text.toString().trim()
+        btBridge.startPersistent(mac)
         if (mac.isNotEmpty()) {
-            btBridge.startPersistent(mac)
-            setStatus("BT auto-connect started")
+            setStatus("BT auto-connect started: $mac")
+        } else {
+            setStatus("BT auto-connect started: ECOPAK auto-detect")
         }
         mainHandler.postDelayed(telemetryRunnable, 1500)
     }
@@ -210,13 +223,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun startBluetoothPersistent() {
         val mac = editBtMac.text.toString().trim()
-        if (mac.isEmpty()) {
-            setStatus("Bluetooth MAC required")
-            return
-        }
         saveDefaults()
         btBridge.startPersistent(mac)
-        setStatus("BT persistent connect started")
+        if (mac.isNotEmpty()) {
+            setStatus("BT persistent connect started: $mac")
+        } else {
+            setStatus("BT persistent connect started: auto ECOPAK")
+        }
     }
 
     private fun handleRelayMessage(text: String) {
@@ -397,10 +410,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private class PersistentBluetoothBridge(
+        private val context: Context,
         private val statusCallback: (String) -> Unit
     ) {
-        private val uuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
-        private val commandQueue = LinkedBlockingQueue<String>(500)
+        private enum class ConnectionMode { NONE, CLASSIC, BLE }
+
+        private data class CandidateDevice(
+            val device: BluetoothDevice,
+            val source: String
+        )
+
+        private val classicUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+        private val bleServiceUuid: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val bleRxUuid: UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val bleTxUuid: UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val cccdUuid: UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
+        private val commandQueue = LinkedBlockingQueue<String>(200)
+        private val movementCommands = setOf("w", "s", "a", "b", "x", "f", "e", "c", "g", "m", "r")
+        private val heartbeatCommand = "ü"
 
         @Volatile
         private var running = true
@@ -412,7 +439,30 @@ class MainActivity : AppCompatActivity() {
         private var targetMac: String? = null
 
         @Volatile
-        private var socket: BluetoothSocket? = null
+        private var mode = ConnectionMode.NONE
+
+        @Volatile
+        private var classicSocket: BluetoothSocket? = null
+
+        @Volatile
+        private var bleGatt: BluetoothGatt? = null
+
+        @Volatile
+        private var bleRx: BluetoothGattCharacteristic? = null
+
+        @Volatile
+        private var bleConnected = false
+
+        @Volatile
+        private var bleWriteInProgress = false
+
+        private val bleWriteLock = Object()
+
+        @Volatile
+        private var lastControlCommandAt = 0L
+
+        @Volatile
+        private var lastHeartbeatAt = 0L
 
         private val worker = Thread {
             while (running) {
@@ -421,122 +471,424 @@ class MainActivity : AppCompatActivity() {
                     continue
                 }
 
-                val currentSocket = socket
-                if (currentSocket == null || !currentSocket.isConnected) {
+                if (!isConnected()) {
                     connectLoop()
                     continue
                 }
 
                 try {
-                    val next = commandQueue.poll(500, TimeUnit.MILLISECONDS)
+                    val next = commandQueue.poll(120, TimeUnit.MILLISECONDS)
                     if (next != null) {
-                        val payload = (next + "\n").toByteArray(Charsets.UTF_8)
-                        currentSocket.outputStream.write(payload)
-                        currentSocket.outputStream.flush()
+                        val retries = if (isMovementCommand(next)) 10 else 5
+                        if (!sendWithRetry(next, retries)) {
+                            statusCallback("Bluetooth write failed, reconnecting...")
+                            closeTransports(true)
+                            sleepQuiet(350)
+                        } else if (isMovementCommand(next)) {
+                            lastControlCommandAt = SystemClock.elapsedRealtime()
+                        }
                     } else {
-                        currentSocket.inputStream.available()
+                        validateTransport()
+                        maybeSendHeartbeat()
                     }
                 } catch (_: Exception) {
                     statusCallback("Bluetooth disconnected, reconnecting...")
-                    closeSocket()
+                    closeTransports(true)
                     sleepQuiet(500)
                 }
             }
-            closeSocket()
+            closeTransports(true)
         }.apply {
             name = "BT-Persistent-Worker"
             isDaemon = true
             start()
         }
 
-        fun startPersistent(mac: String) {
-            targetMac = mac.trim().uppercase()
-            keepConnected = targetMac!!.isNotBlank()
-            if (keepConnected) {
-                statusCallback("Bluetooth target: ${targetMac}")
+        fun startPersistent(mac: String?) {
+            targetMac = normalizeMac(mac)
+            keepConnected = true
+            if (targetMac.isNullOrBlank()) {
+                statusCallback("Bluetooth target: auto ECOPAK discovery")
+            } else {
+                statusCallback("Bluetooth target: $targetMac")
             }
         }
 
         fun send(command: String) {
             if (!keepConnected || command.isBlank()) return
-            commandQueue.offer(command)
+            if (!commandQueue.offer(command)) {
+                commandQueue.poll()
+                commandQueue.offer(command)
+            }
         }
 
         fun isConnected(): Boolean {
-            val s = socket
-            return s != null && s.isConnected
+            return when (mode) {
+                ConnectionMode.CLASSIC -> classicSocket?.isConnected == true
+                ConnectionMode.BLE -> bleConnected && bleGatt != null && bleRx != null
+                ConnectionMode.NONE -> false
+            }
         }
 
         fun shutdown() {
             running = false
             keepConnected = false
-            commandQueue.clear()
-            closeSocket()
+            closeTransports(true)
             worker.interrupt()
         }
 
-        private fun connectLoop() {
-            val mac = targetMac
-            if (mac.isNullOrBlank()) {
-                sleepQuiet(500)
-                return
-            }
+        private fun isMovementCommand(command: String): Boolean {
+            return movementCommands.contains(command.trim().lowercase())
+        }
 
-            try {
-                val adapter = BluetoothAdapter.getDefaultAdapter()
-                if (adapter == null) {
-                    statusCallback("Bluetooth adapter missing")
-                    sleepQuiet(1500)
-                    return
-                }
-                if (!adapter.isEnabled) {
-                    statusCallback("Bluetooth is off")
-                    sleepQuiet(1500)
-                    return
-                }
-
-                val device = adapter.getRemoteDevice(mac)
-                adapter.cancelDiscovery()
-
-                closeSocket()
-
-                val trySockets = listOf(
-                    runCatching { device.createInsecureRfcommSocketToServiceRecord(uuid) }.getOrNull(),
-                    runCatching { device.createRfcommSocketToServiceRecord(uuid) }.getOrNull()
-                ).filterNotNull()
-
-                var connected: BluetoothSocket? = null
-                for (s in trySockets) {
-                    try {
-                        s.connect()
-                        connected = s
-                        break
-                    } catch (_: Exception) {
-                        runCatching { s.close() }
-                    }
-                }
-
-                if (connected != null) {
-                    socket = connected
-                    statusCallback("Bluetooth connected: $mac")
-                } else {
-                    statusCallback("Bluetooth connect failed, retrying...")
-                    sleepQuiet(1500)
-                }
-            } catch (_: Exception) {
-                statusCallback("Bluetooth connect error, retrying...")
-                sleepQuiet(1500)
+        private fun maybeSendHeartbeat() {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastControlCommandAt < 150L) return
+            if (now - lastHeartbeatAt < 350L) return
+            if (sendWithRetry(heartbeatCommand, 1)) {
+                lastHeartbeatAt = now
             }
         }
 
-        private fun closeSocket() {
+        private fun sendWithRetry(command: String, maxRetries: Int): Boolean {
+            for (i in 0..maxRetries) {
+                val sent = when (mode) {
+                    ConnectionMode.CLASSIC -> sendClassic(command)
+                    ConnectionMode.BLE -> sendBle(command)
+                    ConnectionMode.NONE -> false
+                }
+                if (sent) return true
+                if (!isConnected()) return false
+                sleepQuiet(60)
+            }
+            return false
+        }
+
+        private fun sendClassic(command: String): Boolean {
+            val socket = classicSocket ?: return false
+            return try {
+                socket.outputStream.write(command.toByteArray(Charsets.UTF_8))
+                socket.outputStream.flush()
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        private fun sendBle(command: String): Boolean {
+            val gatt = bleGatt ?: return false
+            val rx = bleRx ?: return false
+            if (!bleConnected) return false
+
+            return synchronized(bleWriteLock) {
+                if (bleWriteInProgress) {
+                    try {
+                        bleWriteLock.wait(80)
+                    } catch (_: InterruptedException) {
+                        return@synchronized false
+                    }
+                }
+                if (bleWriteInProgress || !bleConnected) return@synchronized false
+
+                val noResp = (rx.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                rx.writeType = if (noResp) {
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                } else {
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                }
+                rx.value = command.toByteArray(Charsets.UTF_8)
+                bleWriteInProgress = true
+                val queued = runCatching { gatt.writeCharacteristic(rx) }.getOrDefault(false)
+                if (!queued) {
+                    bleWriteInProgress = false
+                    return@synchronized false
+                }
+                if (noResp) {
+                    bleWriteInProgress = false
+                    return@synchronized true
+                }
+                try {
+                    bleWriteLock.wait(120)
+                } catch (_: InterruptedException) {
+                    bleWriteInProgress = false
+                    return@synchronized false
+                }
+                bleWriteInProgress = false
+                true
+            }
+        }
+
+        private fun validateTransport() {
+            when (mode) {
+                ConnectionMode.CLASSIC -> {
+                    val socket = classicSocket ?: throw IllegalStateException("No classic socket")
+                    if (!socket.isConnected) throw IllegalStateException("Classic socket disconnected")
+                    socket.inputStream.available()
+                }
+                ConnectionMode.BLE -> if (!bleConnected || bleGatt == null || bleRx == null) {
+                    throw IllegalStateException("BLE disconnected")
+                }
+                ConnectionMode.NONE -> throw IllegalStateException("No transport")
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun connectLoop() {
+            if (!hasConnectPermission()) {
+                statusCallback("Bluetooth permission missing")
+                sleepQuiet(1500)
+                return
+            }
+
+            val adapter = BluetoothAdapter.getDefaultAdapter()
+            if (adapter == null) {
+                statusCallback("Bluetooth adapter missing")
+                sleepQuiet(1500)
+                return
+            }
+            if (!adapter.isEnabled) {
+                statusCallback("Bluetooth is off")
+                sleepQuiet(1500)
+                return
+            }
+
+            val candidate = resolveTargetDevice(adapter)
+            if (candidate == null) {
+                statusCallback("ECOPAK device not found, retrying...")
+                sleepQuiet(1800)
+                return
+            }
+
+            val display = candidate.device.name ?: candidate.device.address
+            statusCallback("Connecting $display (${candidate.source})")
+            val order = connectionOrder(candidate.device)
+            for (transport in order) {
+                val ok = when (transport) {
+                    ConnectionMode.CLASSIC -> connectClassic(candidate.device)
+                    ConnectionMode.BLE -> connectBle(candidate.device)
+                    ConnectionMode.NONE -> false
+                }
+                if (ok) {
+                    statusCallback("Bluetooth connected (${transport.name.lowercase()}): $display")
+                    return
+                }
+            }
+
+            statusCallback("Bluetooth connect failed, retrying...")
+            closeTransports(true)
+            sleepQuiet(1400)
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun resolveTargetDevice(adapter: BluetoothAdapter): CandidateDevice? {
+            val manual = targetMac
+            if (!manual.isNullOrBlank()) {
+                val device = runCatching { adapter.getRemoteDevice(manual) }.getOrNull()
+                if (device != null) return CandidateDevice(device, "manual")
+            }
+
+            val bonded = runCatching { adapter.bondedDevices }.getOrNull().orEmpty()
+                .sortedBy { it.name ?: it.address }
+            bonded.firstOrNull { isEcopakName(it.name) }?.let { return CandidateDevice(it, "bonded") }
+
+            val scanned = scanBleForEcopak(adapter, 6000)
+            if (scanned != null) return CandidateDevice(scanned, "ble_scan")
+            return null
+        }
+
+        private fun connectionOrder(device: BluetoothDevice): List<ConnectionMode> {
+            return when {
+                device.bondState == BluetoothDevice.BOND_BONDED -> listOf(ConnectionMode.CLASSIC, ConnectionMode.BLE)
+                device.type == BluetoothDevice.DEVICE_TYPE_LE -> listOf(ConnectionMode.BLE, ConnectionMode.CLASSIC)
+                else -> listOf(ConnectionMode.CLASSIC, ConnectionMode.BLE)
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun connectClassic(device: BluetoothDevice): Boolean {
+            if (!hasConnectPermission()) return false
+            val adapter = BluetoothAdapter.getDefaultAdapter() ?: return false
+            runCatching { adapter.cancelDiscovery() }
+            closeClassicSocket()
+
+            val sockets = listOfNotNull(
+                runCatching { device.createInsecureRfcommSocketToServiceRecord(classicUuid) }.getOrNull(),
+                runCatching { device.createRfcommSocketToServiceRecord(classicUuid) }.getOrNull()
+            )
+            for (socket in sockets) {
+                try {
+                    socket.connect()
+                    classicSocket = socket
+                    mode = ConnectionMode.CLASSIC
+                    return true
+                } catch (_: Exception) {
+                    runCatching { socket.close() }
+                }
+            }
+            return false
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun connectBle(device: BluetoothDevice): Boolean {
+            if (!hasConnectPermission()) return false
+            closeBle()
+            val readySignal = CountDownLatch(1)
+            var ready = false
+            val callback = object : BluetoothGattCallback() {
+                override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                    if (newState == BluetoothGatt.STATE_CONNECTED) {
+                        bleConnected = true
+                        runCatching { gatt.discoverServices() }
+                    } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+                        bleConnected = false
+                        readySignal.countDown()
+                        runCatching { gatt.close() }
+                    }
+                }
+                override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        readySignal.countDown()
+                        return
+                    }
+                    val service = gatt.getService(bleServiceUuid)
+                    val rx = service?.getCharacteristic(bleRxUuid)
+                    val tx = service?.getCharacteristic(bleTxUuid)
+                    if (rx == null || tx == null) {
+                        readySignal.countDown()
+                        return
+                    }
+                    bleRx = rx
+                    runCatching { gatt.setCharacteristicNotification(tx, true) }
+                    tx.getDescriptor(cccdUuid)?.let { descriptor ->
+                        runCatching {
+                            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            gatt.writeDescriptor(descriptor)
+                        }
+                    }
+                    ready = true
+                    readySignal.countDown()
+                }
+                override fun onCharacteristicWrite(
+                    gatt: BluetoothGatt,
+                    characteristic: BluetoothGattCharacteristic,
+                    status: Int
+                ) {
+                    synchronized(bleWriteLock) {
+                        bleWriteInProgress = false
+                        bleWriteLock.notifyAll()
+                    }
+                }
+            }
+
+            bleGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+            } else {
+                device.connectGatt(context, false, callback)
+            }
+            if (bleGatt == null) return false
+            val signaled = runCatching { readySignal.await(12, TimeUnit.SECONDS) }.getOrDefault(false)
+            if (!signaled || !ready || !bleConnected || bleRx == null) {
+                closeBle()
+                return false
+            }
+            mode = ConnectionMode.BLE
+            return true
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun scanBleForEcopak(adapter: BluetoothAdapter, timeoutMs: Long): BluetoothDevice? {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return null
+            if (!hasScanPermission()) return null
+            val scanner = adapter.bluetoothLeScanner ?: return null
+            val found = AtomicReference<BluetoothDevice?>(null)
+            val done = CountDownLatch(1)
+            val callback = object : ScanCallback() {
+                override fun onScanResult(callbackType: Int, result: ScanResult) {
+                    val device = result.device ?: return
+                    if (isEcopakName(device.name) && found.compareAndSet(null, device)) {
+                        done.countDown()
+                    }
+                }
+                override fun onScanFailed(errorCode: Int) {
+                    done.countDown()
+                }
+            }
+            return try {
+                scanner.startScan(
+                    null,
+                    ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
+                    callback
+                )
+                done.await(timeoutMs, TimeUnit.MILLISECONDS)
+                found.get()
+            } catch (_: Exception) {
+                null
+            } finally {
+                runCatching { scanner.stopScan(callback) }
+            }
+        }
+
+        private fun hasConnectPermission(): Boolean {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+            return ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+
+        private fun hasScanPermission(): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                return ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.BLUETOOTH_SCAN
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+            return ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+
+        private fun isEcopakName(name: String?): Boolean {
+            if (name.isNullOrBlank()) return false
+            return name.startsWith("ECOPAK-", ignoreCase = true) ||
+                name.contains("ECOPAK", ignoreCase = true)
+        }
+
+        private fun normalizeMac(raw: String?): String? {
+            val value = raw?.trim()?.uppercase() ?: return null
+            if (value.isBlank()) return null
+            val pattern = Regex("^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
+            return if (pattern.matches(value)) value else null
+        }
+
+        private fun closeTransports(clearQueue: Boolean) {
+            closeClassicSocket()
+            closeBle()
+            mode = ConnectionMode.NONE
+            if (clearQueue) commandQueue.clear()
+        }
+
+        private fun closeClassicSocket() {
             try {
-                socket?.close()
+                classicSocket?.close()
             } catch (_: Exception) {
                 // ignore
             } finally {
-                socket = null
+                classicSocket = null
             }
+        }
+
+        private fun closeBle() {
+            synchronized(bleWriteLock) {
+                bleWriteInProgress = false
+                bleWriteLock.notifyAll()
+            }
+            runCatching { bleGatt?.disconnect() }
+            runCatching { bleGatt?.close() }
+            bleGatt = null
+            bleRx = null
+            bleConnected = false
         }
 
         private fun sleepQuiet(ms: Long) {
