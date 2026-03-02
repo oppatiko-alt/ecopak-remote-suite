@@ -44,6 +44,7 @@ import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
@@ -52,6 +53,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import okio.ByteString.Companion.toByteString
 
 class MainActivity : AppCompatActivity() {
 
@@ -92,6 +94,9 @@ class MainActivity : AppCompatActivity() {
 
     private val frameSendAttempts = AtomicInteger(0)
     private val frameSendSuccess = AtomicInteger(0)
+    private val frameQueuePressureHits = AtomicInteger(0)
+    private val maxWsQueueBytes = 512_000L
+    private val frameMagic: Byte = 0x45
 
     private val prefs by lazy { getSharedPreferences("bridge_prefs", MODE_PRIVATE) }
 
@@ -223,6 +228,7 @@ class MainActivity : AppCompatActivity() {
                 remoteViewerCount = 0
                 frameSendAttempts.set(0)
                 frameSendSuccess.set(0)
+                frameQueuePressureHits.set(0)
                 val reg = JSONObject()
                     .put("type", "register_bridge")
                     .put("sessionId", session)
@@ -237,12 +243,14 @@ class MainActivity : AppCompatActivity() {
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 remoteViewerCount = 0
+                frameQueuePressureHits.set(0)
                 runOnUiThread { setStatus("Relay closed: $code") }
                 scheduleWsReconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 remoteViewerCount = 0
+                frameQueuePressureHits.set(0)
                 runOnUiThread { setStatus("Relay error: ${t.message}") }
                 scheduleWsReconnect()
             }
@@ -334,17 +342,18 @@ class MainActivity : AppCompatActivity() {
 
             val now = SystemClock.elapsedRealtime()
             if (now - lastFrameSentAt < currentFrameIntervalMs) return
-            val base64 = imageToJpegBase64(image, currentJpegQuality) ?: return
-
-            val msg = JSONObject()
-                .put("type", "video_frame")
-                .put("jpegBase64", base64)
-                .put("ts", System.currentTimeMillis())
-                .put("width", image.width)
-                .put("height", image.height)
+            val wsQueueSize = ws?.queueSize() ?: 0L
+            if (wsQueueSize > maxWsQueueBytes) {
+                frameQueuePressureHits.incrementAndGet()
+                frameSendAttempts.incrementAndGet()
+                return
+            }
+            val jpegBytes = imageToJpegBytes(image, currentJpegQuality) ?: return
+            val ts = System.currentTimeMillis()
+            val packet = buildBinaryFramePacket(ts, image.width, image.height, jpegBytes)
 
             frameSendAttempts.incrementAndGet()
-            val sent = ws?.send(msg.toString()) == true
+            val sent = ws?.send(packet.toByteString()) == true
             if (sent) {
                 frameSendSuccess.incrementAndGet()
                 lastFrameSentAt = now
@@ -354,14 +363,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun buildBinaryFramePacket(
+        ts: Long,
+        width: Int,
+        height: Int,
+        jpegBytes: ByteArray
+    ): ByteArray {
+        val payload = ByteArray(13 + jpegBytes.size)
+        val bb = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
+        bb.put(frameMagic)
+        bb.putLong(ts)
+        bb.putShort(width.coerceIn(0, 65535).toShort())
+        bb.putShort(height.coerceIn(0, 65535).toShort())
+        bb.put(jpegBytes)
+        return payload
+    }
+
     private fun adaptVideoEncodingProfile() {
         val attempts = frameSendAttempts.getAndSet(0)
         val success = frameSendSuccess.getAndSet(0)
-        if (attempts <= 0) return
+        val queuePressure = frameQueuePressureHits.getAndSet(0)
+        if (attempts <= 0 && queuePressure <= 0) return
 
-        val ratio = success.toDouble() / attempts.toDouble()
+        val ratio = if (attempts <= 0) 1.0 else success.toDouble() / attempts.toDouble()
 
-        if (ratio < 0.90) {
+        if (ratio < 0.90 || queuePressure > 0) {
             currentVideoFps = (currentVideoFps - 2).coerceAtLeast(minVideoFps)
             currentJpegQuality = (currentJpegQuality - 2).coerceAtLeast(minJpegQuality)
         } else if (ratio > 0.98) {
@@ -372,13 +398,13 @@ class MainActivity : AppCompatActivity() {
         currentFrameIntervalMs = (1000L / currentVideoFps).coerceAtLeast(55L)
     }
 
-    private fun imageToJpegBase64(image: ImageProxy, quality: Int): String? {
+    private fun imageToJpegBytes(image: ImageProxy, quality: Int): ByteArray? {
         return try {
             val nv21 = yuv420ToNv21(image)
             val yuv = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
             val out = ByteArrayOutputStream()
             yuv.compressToJpeg(Rect(0, 0, image.width, image.height), quality, out)
-            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            out.toByteArray()
         } catch (_: Exception) {
             null
         }

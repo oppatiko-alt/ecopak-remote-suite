@@ -4,9 +4,11 @@ const { WebSocketServer } = require('ws');
 const PORT = Number(process.env.PORT || 8080);
 const AUTH_TOKEN = process.env.ECOPAK_RELAY_TOKEN || '';
 const MAX_FRAME_B64 = Number(process.env.MAX_FRAME_B64 || 320000);
+const MAX_FRAME_BYTES = Number(process.env.MAX_FRAME_BYTES || 220000);
 const FRAME_FANOUT_FPS = Math.max(1, Number(process.env.FRAME_FANOUT_FPS || 18));
 const REMOTE_BUFFER_MAX = Math.max(0, Number(process.env.REMOTE_BUFFER_MAX || 262144));
 const UPTIME_STARTED_AT = Date.now();
+const FRAME_MAGIC = 0x45;
 
 const sessions = new Map();
 const metrics = {
@@ -74,6 +76,27 @@ function notifyViewerCount(session) {
   });
 }
 
+function parseBinaryFramePacket(raw) {
+  const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  if (buf.length < 13) return null;
+  if (buf[0] !== FRAME_MAGIC) return null;
+  if (buf.length > MAX_FRAME_BYTES) return null;
+
+  const ts = Number(buf.readBigInt64BE(1));
+  const width = buf.readUInt16BE(9);
+  const height = buf.readUInt16BE(11);
+  const jpegBytes = buf.subarray(13);
+  if (jpegBytes.length === 0) return null;
+
+  return {
+    kind: 'binary',
+    data: Buffer.from(buf),
+    ts,
+    width,
+    height,
+  };
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.statusCode = 200;
@@ -107,7 +130,30 @@ wss.on('connection', (ws) => {
     ws.meta.isAlive = true;
   });
 
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
+    const role = ws.meta.role;
+    const sessionId = ws.meta.sessionId;
+
+    if (isBinary) {
+      if (role !== 'bridge' || !sessionId) {
+        return;
+      }
+      const session = sessions.get(sessionId);
+      if (!session) {
+        return;
+      }
+
+      const binaryFrame = parseBinaryFramePacket(raw);
+      if (!binaryFrame) {
+        metrics.framesDroppedOversize += 1;
+        return;
+      }
+
+      metrics.framesIn += 1;
+      session.latestFrame = binaryFrame;
+      return;
+    }
+
     const msg = safeParse(raw.toString());
     if (!msg || typeof msg.type !== 'string') {
       sendJson(ws, { type: 'error', message: 'invalid_json' });
@@ -115,9 +161,9 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'register_bridge') {
-      const sessionId = String(msg.sessionId || '').trim();
+      const bridgeSessionId = String(msg.sessionId || '').trim();
       const token = String(msg.token || '');
-      if (!sessionId) {
+      if (!bridgeSessionId) {
         sendJson(ws, { type: 'error', message: 'session_required' });
         return;
       }
@@ -127,16 +173,16 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      const session = getSession(sessionId);
+      const session = getSession(bridgeSessionId);
       if (session.bridge && session.bridge !== ws) {
         sendJson(session.bridge, { type: 'info', message: 'bridge_replaced' });
         closeWith(session.bridge, 4000, 'bridge_replaced');
       }
 
       ws.meta.role = 'bridge';
-      ws.meta.sessionId = sessionId;
+      ws.meta.sessionId = bridgeSessionId;
       session.bridge = ws;
-      sendJson(ws, { type: 'registered', role: 'bridge', sessionId });
+      sendJson(ws, { type: 'registered', role: 'bridge', sessionId: bridgeSessionId });
       notifyViewerCount(session);
 
       for (const remote of session.remotes) {
@@ -146,9 +192,9 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'register_remote') {
-      const sessionId = String(msg.sessionId || '').trim();
+      const remoteSessionId = String(msg.sessionId || '').trim();
       const token = String(msg.token || '');
-      if (!sessionId) {
+      if (!remoteSessionId) {
         sendJson(ws, { type: 'error', message: 'session_required' });
         return;
       }
@@ -158,22 +204,20 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      const session = getSession(sessionId);
+      const session = getSession(remoteSessionId);
       ws.meta.role = 'remote';
-      ws.meta.sessionId = sessionId;
+      ws.meta.sessionId = remoteSessionId;
       session.remotes.add(ws);
       sendJson(ws, {
         type: 'registered',
         role: 'remote',
-        sessionId,
+        sessionId: remoteSessionId,
         bridgeConnected: Boolean(session.bridge),
       });
       notifyViewerCount(session);
       return;
     }
 
-    const role = ws.meta.role;
-    const sessionId = ws.meta.sessionId;
     if (!role || !sessionId) {
       sendJson(ws, { type: 'error', message: 'register_first' });
       return;
@@ -221,11 +265,14 @@ wss.on('connection', (ws) => {
 
       metrics.framesIn += 1;
       session.latestFrame = {
-        type: 'video_frame',
-        jpegBase64: frame,
-        ts: Number(msg.ts || Date.now()),
-        width: Number(msg.width || 0),
-        height: Number(msg.height || 0),
+        kind: 'json',
+        payload: {
+          type: 'video_frame',
+          jpegBase64: frame,
+          ts: Number(msg.ts || Date.now()),
+          width: Number(msg.width || 0),
+          height: Number(msg.height || 0),
+        },
       };
       return;
     }
@@ -278,7 +325,7 @@ const frameFanoutInterval = setInterval(() => {
     if (!session.latestFrame) continue;
     if (session.remotes.size === 0) continue;
 
-    const payload = session.latestFrame;
+    const frame = session.latestFrame;
     session.latestFrame = null;
 
     for (const remote of session.remotes) {
@@ -287,8 +334,17 @@ const frameFanoutInterval = setInterval(() => {
         metrics.framesDroppedBackpressure += 1;
         continue;
       }
-      sendJson(remote, payload);
-      metrics.framesOut += 1;
+
+      try {
+        if (frame.kind === 'binary') {
+          remote.send(frame.data, { binary: true });
+        } else {
+          sendJson(remote, frame.payload);
+        }
+        metrics.framesOut += 1;
+      } catch {
+        // ignore send errors
+      }
     }
   }
 }, Math.max(20, Math.round(1000 / FRAME_FANOUT_FPS)));

@@ -19,7 +19,10 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -27,7 +30,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : AppCompatActivity() {
     private data class PendingFrame(
-        val jpegBase64: String,
+        val jpegBytes: ByteArray,
         val ts: Long
     )
 
@@ -61,6 +64,7 @@ class MainActivity : AppCompatActivity() {
 
     private val latencyAlpha = 0.2
     private val uiFrameIntervalMs = 1000L / 18L
+    private val frameMagic = 0x45
 
     private var movingForward = false
     private var movingBackward = false
@@ -301,6 +305,10 @@ class MainActivity : AppCompatActivity() {
                 handleRelayMessage(text)
             }
 
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                handleBinaryFrame(bytes.toByteArray())
+            }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 runOnUiThread { setStatus("Relay closed: $code") }
                 scheduleReconnect()
@@ -345,7 +353,11 @@ class MainActivity : AppCompatActivity() {
                 val b64 = obj.optString("jpegBase64")
                 val ts = obj.optLong("ts", System.currentTimeMillis())
                 if (b64.isNotEmpty()) {
-                    latestFrameRef.set(PendingFrame(b64, ts))
+                    runCatching {
+                        Base64.decode(b64, Base64.DEFAULT)
+                    }.getOrNull()?.let { jpeg ->
+                        latestFrameRef.set(PendingFrame(jpeg, ts))
+                    }
                 }
             }
 
@@ -353,6 +365,18 @@ class MainActivity : AppCompatActivity() {
                 setStatus("Relay error: ${obj.optString("message")}")
             }
         }
+    }
+
+    private fun handleBinaryFrame(packet: ByteArray) {
+        if (packet.size < 13) return
+        if ((packet[0].toInt() and 0xFF) != frameMagic) return
+
+        val bb = ByteBuffer.wrap(packet).order(ByteOrder.BIG_ENDIAN)
+        bb.position(1)
+        val ts = bb.long
+        val jpeg = packet.copyOfRange(13, packet.size)
+        if (jpeg.isEmpty()) return
+        latestFrameRef.set(PendingFrame(jpeg, ts))
     }
 
     private fun startDecodeWorker() {
@@ -375,8 +399,12 @@ class MainActivity : AppCompatActivity() {
                         inSampleSize = 1
                     }
 
-                    val bytes = Base64.decode(pending.jpegBase64, Base64.DEFAULT)
-                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: continue
+                    val bmp = BitmapFactory.decodeByteArray(
+                        pending.jpegBytes,
+                        0,
+                        pending.jpegBytes.size,
+                        options
+                    ) ?: continue
                     lastUiFrameAt = now
 
                     val latencyNow = (System.currentTimeMillis() - pending.ts).coerceAtLeast(0)
