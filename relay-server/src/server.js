@@ -4,9 +4,9 @@ const { WebSocketServer } = require('ws');
 const PORT = Number(process.env.PORT || 8080);
 const AUTH_TOKEN = process.env.ECOPAK_RELAY_TOKEN || '';
 const MAX_FRAME_B64 = Number(process.env.MAX_FRAME_B64 || 320000);
-const MAX_FRAME_BYTES = Number(process.env.MAX_FRAME_BYTES || 220000);
+const MAX_FRAME_BYTES = Number(process.env.MAX_FRAME_BYTES || 120000);
 const FRAME_FANOUT_FPS = Math.max(1, Number(process.env.FRAME_FANOUT_FPS || 18));
-const REMOTE_BUFFER_MAX = Math.max(0, Number(process.env.REMOTE_BUFFER_MAX || 262144));
+const REMOTE_BUFFER_MAX = Math.max(0, Number(process.env.REMOTE_BUFFER_MAX || 65536));
 const UPTIME_STARTED_AT = Date.now();
 const FRAME_MAGIC = 0x45;
 

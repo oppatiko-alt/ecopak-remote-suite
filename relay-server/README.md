@@ -12,9 +12,9 @@ npm start
 - `PORT` default: `8080`
 - `ECOPAK_RELAY_TOKEN` optional shared token
 - `FRAME_FANOUT_FPS` default: `18`
-- `REMOTE_BUFFER_MAX` default: `262144`
+- `REMOTE_BUFFER_MAX` default: `65536`
 - `MAX_FRAME_B64` default: `320000`
-- `MAX_FRAME_BYTES` default: `220000`
+- `MAX_FRAME_BYTES` default: `120000`
 
 ## WebSocket messages
 

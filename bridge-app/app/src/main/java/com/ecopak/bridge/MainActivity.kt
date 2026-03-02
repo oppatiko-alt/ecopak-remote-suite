@@ -56,6 +56,11 @@ import java.util.concurrent.atomic.AtomicReference
 import okio.ByteString.Companion.toByteString
 
 class MainActivity : AppCompatActivity() {
+    private data class EncodedFrame(
+        val jpegBytes: ByteArray,
+        val width: Int,
+        val height: Int
+    )
 
     private lateinit var previewView: PreviewView
     private lateinit var txtStatus: TextView
@@ -79,6 +84,9 @@ class MainActivity : AppCompatActivity() {
     private val maxVideoFps = 18
     private val minJpegQuality = 12
     private val maxJpegQuality = 24
+    private val streamWidth = 96
+    private val streamHeight = 54
+    private val maxJpegFrameBytes = 9000
 
     @Volatile
     private var currentVideoFps = 18
@@ -95,7 +103,7 @@ class MainActivity : AppCompatActivity() {
     private val frameSendAttempts = AtomicInteger(0)
     private val frameSendSuccess = AtomicInteger(0)
     private val frameQueuePressureHits = AtomicInteger(0)
-    private val maxWsQueueBytes = 262_144L
+    private val maxWsQueueBytes = 65_536L
     private val frameMagic: Byte = 0x45
 
     private val prefs by lazy { getSharedPreferences("bridge_prefs", MODE_PRIVATE) }
@@ -317,7 +325,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val analysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(128, 72))
+                .setTargetResolution(Size(streamWidth, streamHeight))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
 
@@ -348,9 +356,14 @@ class MainActivity : AppCompatActivity() {
                 frameSendAttempts.incrementAndGet()
                 return
             }
-            val jpegBytes = imageToJpegBytes(image, currentJpegQuality) ?: return
+            val encoded = imageToJpegBytes(image, currentJpegQuality) ?: return
+            if (encoded.jpegBytes.size > maxJpegFrameBytes) {
+                frameQueuePressureHits.incrementAndGet()
+                frameSendAttempts.incrementAndGet()
+                return
+            }
             val ts = System.currentTimeMillis()
-            val packet = buildBinaryFramePacket(ts, image.width, image.height, jpegBytes)
+            val packet = buildBinaryFramePacket(ts, encoded.width, encoded.height, encoded.jpegBytes)
 
             frameSendAttempts.incrementAndGet()
             val sent = ws?.send(packet.toByteString()) == true
@@ -398,16 +411,76 @@ class MainActivity : AppCompatActivity() {
         currentFrameIntervalMs = (1000L / currentVideoFps).coerceAtLeast(55L)
     }
 
-    private fun imageToJpegBytes(image: ImageProxy, quality: Int): ByteArray? {
+    private fun imageToJpegBytes(image: ImageProxy, quality: Int): EncodedFrame? {
         return try {
-            val nv21 = yuv420ToNv21(image)
-            val yuv = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
+            val srcWidth = image.width
+            val srcHeight = image.height
+            val srcNv21 = yuv420ToNv21(image)
+
+            val (outNv21, outWidth, outHeight) = if (srcWidth == streamWidth && srcHeight == streamHeight) {
+                Triple(srcNv21, srcWidth, srcHeight)
+            } else {
+                Triple(
+                    downscaleNv21(srcNv21, srcWidth, srcHeight, streamWidth, streamHeight),
+                    streamWidth,
+                    streamHeight
+                )
+            }
+
+            val yuv = YuvImage(outNv21, ImageFormat.NV21, outWidth, outHeight, null)
             val out = ByteArrayOutputStream()
-            yuv.compressToJpeg(Rect(0, 0, image.width, image.height), quality, out)
-            out.toByteArray()
+            yuv.compressToJpeg(Rect(0, 0, outWidth, outHeight), quality, out)
+            EncodedFrame(out.toByteArray(), outWidth, outHeight)
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun downscaleNv21(
+        src: ByteArray,
+        srcWidth: Int,
+        srcHeight: Int,
+        dstWidth: Int,
+        dstHeight: Int
+    ): ByteArray {
+        val safeDstWidth = if (dstWidth % 2 == 0) dstWidth else dstWidth - 1
+        val safeDstHeight = if (dstHeight % 2 == 0) dstHeight else dstHeight - 1
+
+        val dst = ByteArray((safeDstWidth * safeDstHeight * 3) / 2)
+        val srcYSize = srcWidth * srcHeight
+        val dstYSize = safeDstWidth * safeDstHeight
+
+        for (y in 0 until safeDstHeight) {
+            val srcY = (y * srcHeight) / safeDstHeight
+            val srcRow = srcY * srcWidth
+            val dstRow = y * safeDstWidth
+            for (x in 0 until safeDstWidth) {
+                val srcX = (x * srcWidth) / safeDstWidth
+                dst[dstRow + x] = src[srcRow + srcX]
+            }
+        }
+
+        val srcUvStart = srcYSize
+        val dstUvStart = dstYSize
+        val srcChromaH = srcHeight / 2
+        val dstChromaH = safeDstHeight / 2
+        val srcChromaW = srcWidth / 2
+        val dstChromaW = safeDstWidth / 2
+
+        for (y in 0 until dstChromaH) {
+            val srcY = (y * srcChromaH) / dstChromaH
+            val srcRow = srcUvStart + srcY * srcWidth
+            val dstRow = dstUvStart + y * safeDstWidth
+            for (x in 0 until dstChromaW) {
+                val srcX = (x * srcChromaW) / dstChromaW
+                val srcIndex = srcRow + (srcX * 2)
+                val dstIndex = dstRow + (x * 2)
+                dst[dstIndex] = src[srcIndex]
+                dst[dstIndex + 1] = src[srcIndex + 1]
+            }
+        }
+
+        return dst
     }
 
     private fun yuv420ToNv21(image: ImageProxy): ByteArray {
