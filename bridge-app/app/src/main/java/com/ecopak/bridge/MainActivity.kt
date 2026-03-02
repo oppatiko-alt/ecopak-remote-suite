@@ -23,6 +23,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Base64
+import android.util.Size
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -49,6 +50,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : AppCompatActivity() {
@@ -71,7 +73,25 @@ class MainActivity : AppCompatActivity() {
         .build()
 
     private var lastFrameSentAt = 0L
-    private val frameIntervalMs = 160L
+    private val minVideoFps = 10
+    private val maxVideoFps = 18
+    private val minJpegQuality = 24
+    private val maxJpegQuality = 34
+
+    @Volatile
+    private var currentVideoFps = 14
+
+    @Volatile
+    private var currentFrameIntervalMs = 1000L / currentVideoFps
+
+    @Volatile
+    private var currentJpegQuality = 28
+
+    @Volatile
+    private var remoteViewerCount = 0
+
+    private val frameSendAttempts = AtomicInteger(0)
+    private val frameSendSuccess = AtomicInteger(0)
 
     private val prefs by lazy { getSharedPreferences("bridge_prefs", MODE_PRIVATE) }
 
@@ -88,6 +108,13 @@ class MainActivity : AppCompatActivity() {
     private val telemetryRunnable = object : Runnable {
         override fun run() {
             sendTelemetry()
+            mainHandler.postDelayed(this, 2000)
+        }
+    }
+
+    private val videoAdaptationRunnable = object : Runnable {
+        override fun run() {
+            adaptVideoEncodingProfile()
             mainHandler.postDelayed(this, 2000)
         }
     }
@@ -145,6 +172,8 @@ class MainActivity : AppCompatActivity() {
             setStatus("BT auto-connect started: ECOPAK auto-detect")
         }
         mainHandler.postDelayed(telemetryRunnable, 1500)
+        mainHandler.removeCallbacks(videoAdaptationRunnable)
+        mainHandler.postDelayed(videoAdaptationRunnable, 2000)
     }
 
     private fun requiredPermissions(): Array<String> {
@@ -191,6 +220,9 @@ class MainActivity : AppCompatActivity() {
         val request = Request.Builder().url(wsUrl).build()
         ws = wsClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                remoteViewerCount = 0
+                frameSendAttempts.set(0)
+                frameSendSuccess.set(0)
                 val reg = JSONObject()
                     .put("type", "register_bridge")
                     .put("sessionId", session)
@@ -204,11 +236,13 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                remoteViewerCount = 0
                 runOnUiThread { setStatus("Relay closed: $code") }
                 scheduleWsReconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                remoteViewerCount = 0
                 runOnUiThread { setStatus("Relay error: ${t.message}") }
                 scheduleWsReconnect()
             }
@@ -241,6 +275,9 @@ class MainActivity : AppCompatActivity() {
 
         when (obj.optString("type")) {
             "registered" -> runOnUiThread { setStatus("Bridge registered") }
+            "viewer_count" -> {
+                remoteViewerCount = obj.optInt("count", 0).coerceAtLeast(0)
+            }
             "command" -> {
                 val command = obj.optString("command")
                 if (command.isNotEmpty()) {
@@ -272,6 +309,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val analysis = ImageAnalysis.Builder()
+                .setTargetResolution(Size(320, 180))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
 
@@ -292,10 +330,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleFrame(image: ImageProxy) {
         try {
+            if (remoteViewerCount <= 0) return
+
             val now = SystemClock.elapsedRealtime()
-            if (now - lastFrameSentAt < frameIntervalMs) return
-            val base64 = imageToJpegBase64(image, 45) ?: return
-            lastFrameSentAt = now
+            if (now - lastFrameSentAt < currentFrameIntervalMs) return
+            val base64 = imageToJpegBase64(image, currentJpegQuality) ?: return
 
             val msg = JSONObject()
                 .put("type", "video_frame")
@@ -304,10 +343,33 @@ class MainActivity : AppCompatActivity() {
                 .put("width", image.width)
                 .put("height", image.height)
 
-            ws?.send(msg.toString())
+            frameSendAttempts.incrementAndGet()
+            val sent = ws?.send(msg.toString()) == true
+            if (sent) {
+                frameSendSuccess.incrementAndGet()
+                lastFrameSentAt = now
+            }
         } finally {
             image.close()
         }
+    }
+
+    private fun adaptVideoEncodingProfile() {
+        val attempts = frameSendAttempts.getAndSet(0)
+        val success = frameSendSuccess.getAndSet(0)
+        if (attempts <= 0) return
+
+        val ratio = success.toDouble() / attempts.toDouble()
+
+        if (ratio < 0.90) {
+            currentVideoFps = (currentVideoFps - 2).coerceAtLeast(minVideoFps)
+            currentJpegQuality = (currentJpegQuality - 2).coerceAtLeast(minJpegQuality)
+        } else if (ratio > 0.98) {
+            currentVideoFps = (currentVideoFps + 1).coerceAtMost(maxVideoFps)
+            currentJpegQuality = (currentJpegQuality + 1).coerceAtMost(maxJpegQuality)
+        }
+
+        currentFrameIntervalMs = (1000L / currentVideoFps).coerceAtLeast(55L)
     }
 
     private fun imageToJpegBase64(image: ImageProxy, quality: Int): String? {
@@ -402,6 +464,7 @@ class MainActivity : AppCompatActivity() {
         keepWsConnected = false
         reconnectHandler.removeCallbacks(reconnectRunnable)
         mainHandler.removeCallbacks(telemetryRunnable)
+        mainHandler.removeCallbacks(videoAdaptationRunnable)
         ws?.close(1000, "destroy")
         wsClient.dispatcher.executorService.shutdown()
         cameraExecutor.shutdown()

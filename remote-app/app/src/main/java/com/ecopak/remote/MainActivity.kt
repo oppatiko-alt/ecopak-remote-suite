@@ -1,10 +1,12 @@
 package com.ecopak.remote
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Base64
 import android.view.MotionEvent
 import android.widget.Button
@@ -21,8 +23,13 @@ import org.json.JSONObject
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : AppCompatActivity() {
+    private data class PendingFrame(
+        val jpegBase64: String,
+        val ts: Long
+    )
 
     private lateinit var editServer: EditText
     private lateinit var editSession: EditText
@@ -41,6 +48,19 @@ class MainActivity : AppCompatActivity() {
 
     private val decodeExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences("remote_prefs", MODE_PRIVATE) }
+    private val latestFrameRef = AtomicReference<PendingFrame?>(null)
+
+    @Volatile
+    private var decodeWorkerRunning = true
+
+    @Volatile
+    private var lastUiFrameAt = 0L
+
+    @Volatile
+    private var latencyEwmaMs = -1.0
+
+    private val latencyAlpha = 0.2
+    private val uiFrameIntervalMs = 1000L / 18L
 
     private var movingForward = false
     private var movingBackward = false
@@ -73,6 +93,7 @@ class MainActivity : AppCompatActivity() {
         loadDefaults()
         bindControls()
         updateSpeedLabel()
+        startDecodeWorker()
         connectRelay()
     }
 
@@ -261,6 +282,8 @@ class MainActivity : AppCompatActivity() {
 
         ws?.close(1000, "reconnect")
         reconnectHandler.removeCallbacks(reconnectRunnable)
+        latestFrameRef.set(null)
+        latencyEwmaMs = -1.0
         setStatus("Connecting...")
 
         val request = Request.Builder().url(wsUrl).build()
@@ -321,23 +344,57 @@ class MainActivity : AppCompatActivity() {
             "video_frame" -> {
                 val b64 = obj.optString("jpegBase64")
                 val ts = obj.optLong("ts", System.currentTimeMillis())
-                decodeExecutor.execute {
-                    try {
-                        val bytes = Base64.decode(b64, Base64.DEFAULT)
-                        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        val latency = System.currentTimeMillis() - ts
-                        runOnUiThread {
-                            imgStream.setImageBitmap(bmp)
-                            txtStatus.text = "Video OK | latency: ${latency}ms"
-                        }
-                    } catch (_: Exception) {
-                        // ignore frame decode errors
-                    }
+                if (b64.isNotEmpty()) {
+                    latestFrameRef.set(PendingFrame(b64, ts))
                 }
             }
 
             "error" -> runOnUiThread {
                 setStatus("Relay error: ${obj.optString("message")}")
+            }
+        }
+    }
+
+    private fun startDecodeWorker() {
+        decodeExecutor.execute {
+            while (decodeWorkerRunning) {
+                try {
+                    val pending = latestFrameRef.getAndSet(null)
+                    if (pending == null) {
+                        Thread.sleep(8)
+                        continue
+                    }
+
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastUiFrameAt < uiFrameIntervalMs) {
+                        continue
+                    }
+
+                    val options = BitmapFactory.Options().apply {
+                        inPreferredConfig = Bitmap.Config.RGB_565
+                        inSampleSize = 1
+                    }
+
+                    val bytes = Base64.decode(pending.jpegBase64, Base64.DEFAULT)
+                    val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: continue
+                    lastUiFrameAt = now
+
+                    val latencyNow = (System.currentTimeMillis() - pending.ts).coerceAtLeast(0)
+                    latencyEwmaMs = if (latencyEwmaMs < 0.0) {
+                        latencyNow.toDouble()
+                    } else {
+                        (latencyAlpha * latencyNow) + ((1.0 - latencyAlpha) * latencyEwmaMs)
+                    }
+
+                    runOnUiThread {
+                        imgStream.setImageBitmap(bmp)
+                        txtStatus.text = "Video OK | latency: ${latencyEwmaMs.toInt()}ms"
+                    }
+                } catch (_: InterruptedException) {
+                    break
+                } catch (_: Exception) {
+                    // ignore decode errors
+                }
             }
         }
     }
@@ -387,7 +444,8 @@ class MainActivity : AppCompatActivity() {
         reconnectHandler.removeCallbacks(reconnectRunnable)
         ws?.close(1000, "destroy")
         wsClient.dispatcher.executorService.shutdown()
-        decodeExecutor.shutdown()
+        decodeWorkerRunning = false
+        decodeExecutor.shutdownNow()
         saveDefaults()
     }
 }

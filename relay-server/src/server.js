@@ -3,14 +3,25 @@ const { WebSocketServer } = require('ws');
 
 const PORT = Number(process.env.PORT || 8080);
 const AUTH_TOKEN = process.env.ECOPAK_RELAY_TOKEN || '';
-const MAX_FRAME_B64 = Number(process.env.MAX_FRAME_B64 || 650000);
+const MAX_FRAME_B64 = Number(process.env.MAX_FRAME_B64 || 320000);
+const FRAME_FANOUT_FPS = Math.max(1, Number(process.env.FRAME_FANOUT_FPS || 18));
+const REMOTE_BUFFER_MAX = Math.max(0, Number(process.env.REMOTE_BUFFER_MAX || 262144));
+const UPTIME_STARTED_AT = Date.now();
 
 const sessions = new Map();
+const metrics = {
+  framesIn: 0,
+  framesOut: 0,
+  framesDroppedOversize: 0,
+  framesDroppedBackpressure: 0,
+  commandsIn: 0,
+  commandsOut: 0,
+};
 
 function getSession(sessionId) {
   let s = sessions.get(sessionId);
   if (!s) {
-    s = { bridge: null, remotes: new Set() };
+    s = { bridge: null, remotes: new Set(), latestFrame: null };
     sessions.set(sessionId, s);
   }
   return s;
@@ -26,7 +37,11 @@ function cleanSession(sessionId) {
 
 function sendJson(ws, payload) {
   if (ws.readyState === ws.OPEN) {
-    ws.send(JSON.stringify(payload));
+    try {
+      ws.send(JSON.stringify(payload));
+    } catch {
+      // ignore send failures
+    }
   }
 }
 
@@ -51,11 +66,27 @@ function isAuthorized(token) {
   return token === AUTH_TOKEN;
 }
 
+function notifyViewerCount(session) {
+  if (!session || !session.bridge) return;
+  sendJson(session.bridge, {
+    type: 'viewer_count',
+    count: session.remotes.size,
+  });
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.statusCode = 200;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.end(JSON.stringify({ ok: true, sessions: sessions.size }));
+    res.end(
+      JSON.stringify({
+        ok: true,
+        sessions: sessions.size,
+        clients: wss.clients.size,
+        uptimeSec: Math.floor((Date.now() - UPTIME_STARTED_AT) / 1000),
+        ...metrics,
+      }),
+    );
     return;
   }
 
@@ -106,6 +137,7 @@ wss.on('connection', (ws) => {
       ws.meta.sessionId = sessionId;
       session.bridge = ws;
       sendJson(ws, { type: 'registered', role: 'bridge', sessionId });
+      notifyViewerCount(session);
 
       for (const remote of session.remotes) {
         sendJson(remote, { type: 'bridge_status', connected: true });
@@ -136,6 +168,7 @@ wss.on('connection', (ws) => {
         sessionId,
         bridgeConnected: Boolean(session.bridge),
       });
+      notifyViewerCount(session);
       return;
     }
 
@@ -157,6 +190,7 @@ wss.on('connection', (ws) => {
         sendJson(ws, { type: 'error', message: 'only_remote_can_send_command' });
         return;
       }
+      metrics.commandsIn += 1;
       if (!session.bridge) {
         sendJson(ws, { type: 'error', message: 'bridge_offline' });
         return;
@@ -166,6 +200,7 @@ wss.on('connection', (ws) => {
         command: String(msg.command || ''),
         ts: Date.now(),
       });
+      metrics.commandsOut += 1;
       return;
     }
 
@@ -176,21 +211,22 @@ wss.on('connection', (ws) => {
       }
 
       const frame = String(msg.jpegBase64 || '');
-      if (!frame || frame.length > MAX_FRAME_B64) {
+      if (!frame) {
+        return;
+      }
+      if (frame.length > MAX_FRAME_B64) {
+        metrics.framesDroppedOversize += 1;
         return;
       }
 
-      const payload = {
+      metrics.framesIn += 1;
+      session.latestFrame = {
         type: 'video_frame',
         jpegBase64: frame,
         ts: Number(msg.ts || Date.now()),
         width: Number(msg.width || 0),
         height: Number(msg.height || 0),
       };
-
-      for (const remote of session.remotes) {
-        sendJson(remote, payload);
-      }
       return;
     }
 
@@ -222,6 +258,7 @@ wss.on('connection', (ws) => {
 
     if (role === 'bridge' && session.bridge === ws) {
       session.bridge = null;
+      session.latestFrame = null;
       for (const remote of session.remotes) {
         sendJson(remote, { type: 'bridge_status', connected: false });
       }
@@ -229,11 +266,32 @@ wss.on('connection', (ws) => {
 
     if (role === 'remote') {
       session.remotes.delete(ws);
+      notifyViewerCount(session);
     }
 
     cleanSession(sessionId);
   });
 });
+
+const frameFanoutInterval = setInterval(() => {
+  for (const session of sessions.values()) {
+    if (!session.latestFrame) continue;
+    if (session.remotes.size === 0) continue;
+
+    const payload = session.latestFrame;
+    session.latestFrame = null;
+
+    for (const remote of session.remotes) {
+      if (remote.readyState !== remote.OPEN) continue;
+      if (remote.bufferedAmount > REMOTE_BUFFER_MAX) {
+        metrics.framesDroppedBackpressure += 1;
+        continue;
+      }
+      sendJson(remote, payload);
+      metrics.framesOut += 1;
+    }
+  }
+}, Math.max(20, Math.round(1000 / FRAME_FANOUT_FPS)));
 
 const heartbeatInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
@@ -247,6 +305,7 @@ const heartbeatInterval = setInterval(() => {
 }, 15000);
 
 wss.on('close', () => {
+  clearInterval(frameFanoutInterval);
   clearInterval(heartbeatInterval);
 });
 
