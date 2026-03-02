@@ -23,7 +23,7 @@
             android:layout_height="wrap_content"
             android:hint="Server URL"
             android:inputType="textUri"
-            android:text="wss://ecopakremote.onrender.com"
+            android:text="wss://ecopak-remote-suite-pro.onrender.com"
             android:textColor="@color/bridge_text"
             android:textColorHint="#99FFFFFF" />
 

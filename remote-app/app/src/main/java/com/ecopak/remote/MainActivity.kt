@@ -451,7 +451,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadDefaults() {
-        editServer.setText(prefs.getString("server", "wss://ecopakremote.onrender.com"))
+        editServer.setText(prefs.getString("server", "wss://ecopak-remote-suite-pro.onrender.com"))
         editSession.setText(prefs.getString("session", "ecopak-demo"))
         editToken.setText(prefs.getString("token", "6em44j45"))
         speedIndex = prefs.getInt("speedIndex", 2).coerceIn(0, speedCommands.lastIndex)
