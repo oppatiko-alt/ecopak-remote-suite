@@ -75,19 +75,19 @@ class MainActivity : AppCompatActivity() {
         .build()
 
     private var lastFrameSentAt = 0L
-    private val minVideoFps = 10
+    private val minVideoFps = 12
     private val maxVideoFps = 18
-    private val minJpegQuality = 24
-    private val maxJpegQuality = 34
+    private val minJpegQuality = 12
+    private val maxJpegQuality = 24
 
     @Volatile
-    private var currentVideoFps = 14
+    private var currentVideoFps = 18
 
     @Volatile
     private var currentFrameIntervalMs = 1000L / currentVideoFps
 
     @Volatile
-    private var currentJpegQuality = 28
+    private var currentJpegQuality = 16
 
     @Volatile
     private var remoteViewerCount = 0
@@ -95,7 +95,7 @@ class MainActivity : AppCompatActivity() {
     private val frameSendAttempts = AtomicInteger(0)
     private val frameSendSuccess = AtomicInteger(0)
     private val frameQueuePressureHits = AtomicInteger(0)
-    private val maxWsQueueBytes = 512_000L
+    private val maxWsQueueBytes = 262_144L
     private val frameMagic: Byte = 0x45
 
     private val prefs by lazy { getSharedPreferences("bridge_prefs", MODE_PRIVATE) }
@@ -317,7 +317,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val analysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(320, 180))
+                .setTargetResolution(Size(128, 72))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
 
